@@ -1,0 +1,661 @@
+import discord
+from discord.ext import commands, tasks
+from collections import defaultdict
+import re  # 정규 표현식을 사용하여 필터링할 수 있도록
+import aiohttp  # 비동기 HTTP 요청
+from discord.utils import utcnow
+from datetime import timedelta, datetime, timezone
+import requests
+import asyncio
+import os
+import logging
+import random
+import yt_dlp as youtube_dl
+import json
+from bs4 import BeautifulSoup
+import openai
+
+# 봇 접두어 설정
+intents = discord.Intents.default()
+intents = discord.Intents.all()
+intents.message_content = True  # 메시지 내용 접근을 허용
+intents.messages = True
+intents.members = True
+intents.guilds = True
+
+bot = commands.Bot(command_prefix="?", intents=intents)
+
+VALORANT_PATCH_URL = 'https://playvalorant.com/en-us/news/game-updates/'
+FISCH_GAME_URL = 'https://www.roblox.com/games/16732694052/Fisch'  # Replace with actual game ID
+
+# 최대 경고 횟수 설정 (예: 3회 경고 시 조치)
+WARNING_LIMIT = 2
+
+# 경고 기록 저장
+warnings = defaultdict(int)
+
+WARNINGS_FILE = "warnings.json"  # 경고 기록 파일
+
+# 🔹 JSON에서 경고 기록 불러오기
+def load_warnings():
+    if os.path.exists(WARNINGS_FILE):
+        with open(WARNINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+# 🔹 JSON에 경고 기록 저장
+def save_warnings(warnings):
+    with open(WARNINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(warnings, f, indent=4, ensure_ascii=False)
+
+warnings = load_warnings()
+
+LOG_FILE = "log_channel.json"  # 로그 채널 파일
+
+# 로그 폴더 및 파일 경로 설정
+LOG_FOLDER = 'logs'  # 로그 파일을 저장할 폴더
+if not os.path.exists(LOG_FOLDER):
+    os.makedirs(LOG_FOLDER)  # 폴더가 없으면 생성
+
+# 날짜를 기반으로 한 로그 파일 이름
+LOG_FILE = os.path.join(LOG_FOLDER, f"activity_log_{datetime.now().strftime('%Y-%m-%d')}.json")
+
+# 로그를 파일에 저장하는 함수
+def save_log_to_file(message):
+    # 이미 파일이 존재하면 읽기, 없으면 새로운 리스트 생성
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'r', encoding='utf-8') as file:
+            logs = json.load(file)
+    else:
+        logs = []
+
+    # 새 메시지를 리스트에 추가
+    logs.append(message)
+
+    # 로그를 JSON 형식으로 저장
+    with open(LOG_FILE, 'w', encoding='utf-8') as file:
+        json.dump(logs, file, ensure_ascii=False, indent=4)
+
+MUTE_DURATION = 604800  # 뮤트 시간 (초) - 필요 시 변경 가능
+
+# 관리자 채널 ID 설정 (관리자가 받을 DM 채널 ID)
+admin_id = 1321813368817848382
+
+# 규칙 위반을 감지하는 간단한 필터 예시
+BAD_WORDS = ["시발", "개시발", "씨발", "개씨발", "미친", "미친놈", "미친년", "법규", "게이", "또라이", "레즈비언", "레즈", "ㅅㅂ", "ㅁㅊ", "ㅁㅊㄴ", "ㅁㅊㄴ", "ㄱㅇ", "ㄹㅈ", "ㄹㅈㅂㅇ", "ㄸㄹㅇ", "ㅆㅂ", "tq", "tlqkf", "ㅄ", "ㅂㅅ", "qt", "개새끼", "ㅅㄱㅆ", "ㄳㄲ", "색스", "섹스", "ㅅㅅ", "ㅈㄲ", "ㅅㅂ", "/ㅣ 발", "씨발", "씨바", "시 발", "개세끼", "18년", "18놈", "18새끼", "ㄱㅐㅅㅐㄲl", "ㄱㅐㅈㅏ", "가슴만져", "가슴빨아", "가슴빨어", "가슴조물락", "가슴주물럭", "가슴쪼물딱", "가슴쪼물락", "가슴핧아", "가슴핧어", "강간", "개가튼년", "개가튼뇬", "개같은년", "개걸레", "개고치", "개너미", "개넘", "개년", "개놈", "개늠", "개똥", '개떵', '개떡', '개라슥', '개보지', '개부달', '개부랄', '개불랄', '개붕알', '개새', '개세', '개쓰래기', '개쓰레기', '개씁년', '개씁블', '개씁자지', '개씨발', '개씨블', '개자식', '개자지', '개잡년', '개젓가튼넘', '개좆', '개지랄', '개후라년', '개후라들놈', '개후라새끼', '걔잡년', '거시기', '걸래년', '걸레같은년', '걸레년', '걸레핀년', '게부럴', '게세끼', '게이', '게새끼', '게늠', '게자식', '게지랄놈', '고환', '공지사항', '귀두', '깨쌔끼', '난자마셔', '난자먹어', '난자핧아', '내꺼빨아', '내꺼핧아', '내버지', '내자지', '내잠지', '내조지', '너거애비', '노옴', '누나강간', '니기미', '니뿡', '니뽕', '니씨브랄', '니아범', '니아비', '니애미', '니애뷔', '니애비', '니할애비', '닝기미', '닌기미', '니미', '닳은년', '덜은새끼', '돈새끼', '돌으년', '돌은넘', '돌은새끼', '동생강간', '동성애자', '딸딸이', '똥구녁', '똥꾸뇽', '똥구뇽', '똥', '띠발뇬', '띠팔', '띠펄', '띠풀', '띠벌', '띠벨', '띠빌', '마스터', '막간년', '막대쑤셔줘', '막대핧아줘', '맛간년', '맛없는년', '맛이간년', '멜리스', '미친구녕', '미친구멍', '미친넘', '미친년', '미친놈', '미친눔', '미친새끼', '미친쇄리', '미친쇠리', '미친쉐이', '미친씨부랄', '미튄', '미티넘', '미틴', '미틴넘', '미틴년', '미틴놈', '미틴것', '백보지', '버따리자지', '버지구녕', '버지구멍', '버지냄새', '버지따먹기', '버지뚫어', '버지뜨더', '버지물마셔', '버지벌려', '버지벌료', '버지빨아', '버지빨어', '버지썰어', '버지쑤셔', '버지털', '버지핧아', '버짓물', '버짓물마셔', '벌창같은년', '벵신', '병닥', '병딱', '병신', '보쥐', '보지', '보지핧어', '보짓물', '보짓물마셔', '봉알', '부랄', '불알', '붕알', '붜지', '뷩딱', '븅쉰', '븅신', '빙띤', '빙신', '빠가십새', '빠가씹새', '빠구리', '빠굴이', '뻑큐', '뽕알', '뽀지', '뼝신', '사까시', '상년', '새꺄', '새뀌', '새끼', '색갸', '색끼', '색스', '색키', '샤발', '써글', '써글년', '성교', '성폭행', '세꺄', '세끼', '섹스', '섹스하자', '섹스해', '섹쓰', '섹히', '수셔', '쑤셔', '쉐끼', '쉑갸', '쉑쓰', '쉬발', '쉬방', '쉬밸년', '쉬벌', '쉬불', '쉬붕', '쉬빨', '쉬이발', '쉬이방', '쉬이벌', '쉬이불', '쉬이붕', '쉬이빨', '쉬이팔', '쉬이펄', '쉬이풀', '쉬팔', '쉬펄', '쉬풀', '쉽쌔', '시댕이', '시발', '시발년', '시발놈', '시발새끼', '시방새', '시밸', '시벌', '시불', '시붕', '시이발', '시이벌', '시이불', '시이붕', '시이팔', '시이펄', '시이풀', '시팍새끼', '시팔', '시팔넘', '시팔년', '시팔놈', '시팔새끼', '시펄', '실프', '십8', '십때끼', '십떼끼', '십버지', '십부랄', '십부럴', '십새', '십세이', '십셰리', '십쉐', '십자석', '십자슥', '십지랄', '십창녀', '십창', '십탱', '십탱구리', '십탱굴이', '십팔새끼', 'ㅆㅂ', 'ㅆㅂㄹㅁ', 'ㅆㅂㄻ', 'ㅆㅣ', '쌍넘', '쌍년', '쌍놈', '쌍눔', '쌍보지', '쌔끼', '쌔리', '쌕스', '쌕쓰', '썅년', '썅놈', '썅뇬', '썅늠', '쓉새', '쓰바새끼', '쓰브랄쉽세', '씌발', '씌팔', '씨가랭넘', '씨가랭년', '씨가랭놈', '씨발', '씨발년', '씨발롬', '씨발병신', '씨방새', '씨방세', '씨밸', '씨뱅가리', '씨벌', '씨벌년', '씨벌쉐이', '씨부랄', '씨부럴', '씨불', '씨불알', '씨붕', '씨브럴', '씨블', '씨블년', '씨븡새끼', '씨빨', '씨이발', '씨이벌', '씨이불', '씨이붕', '씨이팔', '씨파넘', '씨팍새끼', '씨팍세끼', '씨팔', '씨펄', '씨퐁넘', '씨퐁뇬', '씨퐁보지', '씨퐁자지', '씹년', '씹물', '씹미랄', '씹버지', '씹보지', '씹부랄', '씹브랄', '씹빵구', '씹뽀지', '씹새', '씹새끼', '씹세', '씹쌔끼', '씹자석', '씹자슥', '씹자지', '씹지랄', '씹창', '씹창녀', '씹탱', '씹탱굴이', '씹탱이', '씹팔', '아가리', '애무', '애미', '애미랄', '애미보지', '애미씨뱅', '애미자지', '애미잡년', '애미좃물', '애비', '애자', '양아치', '어미강간', '어미따먹자', '어미쑤시자', '영자', '엄창', '에미', '에비', '엔플레버', '엠플레버', '염병', '염병할', '염뵹', '엿먹어라', '오랄', '오르가즘', '왕버지', '왕자지', '왕잠지', '왕털버지', '왕털보지', '왕털자지', '왕털잠지', '우미쑤셔', '운디네', '운영자', '유두', '유두빨어', '유두핧어', '유방', '유방만져', '유방빨아', '유방주물럭', '유방쪼물딱', '유방쪼물럭', '유방핧아', '유방핧어', '육갑', '이그니스', '이년', '이프리트', '자기핧아', '자지', '자지구녕', '자지구멍', '자지꽂아', '자지넣자', '자지뜨더', '자지뜯어', '자지박어', '자지빨아', '자지빨아줘', '자지빨어', '자지쑤셔', '자지쓰레기', '자지정개', '자지짤라', '자지털', '자지핧아', '자지핧아줘', '자지핧어', '작은보지', '잠지', '잠지뚫어', '잠지물마셔', '잠지털', '잠짓물마셔', '잡년', '잡놈', '저년', '점물', '젓가튼', '젓가튼쉐이', '젓같내', '젓같은', '젓까', '젓나', '젓냄새', '젓대가리', '젓떠', '젓마무리', '젓만이', '젓물', '젓물냄새', '젓밥', '정액마셔', '정액먹어', '정액발사', '정액짜', '정액핧아', '정자마셔', '정자먹어', '정자핧아', '젖같은', '젖까', '젖밥', '젖탱이', '조개넓은년', '조개따조', '조개마셔줘', '조개벌려조', '조개속물', '조개쑤셔줘', '조개핧아줘', '조까', '조또', '족같내', '족까', '족까내', '존나', '존나게', '존니', '졸라', '좀마니', '좀물', '좀쓰레기', '좁빠라라', '좃가튼뇬', '좃간년', '좃까', '좃까리', '좃깟네', '좃냄새', '좃넘', '좃대가리', '좃도', '좃또', '좃만아', '좃만이', '좃만한것', '좃만한쉐이', '좃물', '좃물냄새', '좃보지', '좃부랄', '좃빠구리', '좃빠네', '좃빠라라', '좃털', '좆같은놈', '좆같은새끼', '좆까', '좆까라', '좆나', '좆년', '좆도', '좆만아', '좆만한년', '좆만한놈', '좆만한새끼', '좆먹어', '좆물', '좆밥', '좆빨아', '좆새끼', '좆털', '좋만한것', '주글년', '주길년', '쥐랄', '지랄', '지랼', '지럴', '지뢀', '쪼까튼', '쪼다', '쪼다새끼', '찌랄', '찌질이', '창남', '창녀', '창녀버지', '창년', '처먹고', '처먹을', '쳐먹고', '쳐쑤셔박어', '촌씨브라리', '촌씨브랑이', '촌씨브랭이', '크리토리스', '큰보지', '클리토리스', '트랜스젠더', '페니스', '항문수셔', '항문쑤셔', '허덥', '허버리년', '허벌년', '허벌보지', '허벌자식', '허벌자지', '허접', '허젚', '허졉', '허좁', '헐렁보지', '혀로보지핧기', '호냥년', '호로', '호로새끼', '호로자슥', '호로자식', '호로짜식', '호루자슥', '호모', '호졉', '호좁', '후라덜넘', '후장', '후장꽂아', '후장뚫어', '흐접', '흐젚', '흐졉', 'bitch', 'fuck', "fuckyou", "nflavor", "penis", "pennis", "pussy", "sex", "시8", "시2발", "시1발", "씨 발", "시 발", "/\  ㅣ 발", "병시신발", "ㅗ", "장애", "좇가", "좇까", "시.       발", "씨붤", "쒸벌", "쒸발", "씨 빌", "쓰레기 ㅅㄲ", "쓰래기 년", "쓰래기 ㅅㄲ", "쓰레기 년", "나가 뒤져", "ㅅㄲ", "ㄴㄱㅁ", "느금마", ]  # 여기에 위반 규칙을 추가할 수 있음
+
+@bot.event
+async def on_ready():
+    print(f"{bot.user}로 로그인했습니다!")
+
+# 규칙 위반 감지 함수
+def contains_bad_words(message):
+    for word in BAD_WORDS:
+        if re.search(r"\b" + re.escape(word) + r"\b", message.content, re.IGNORECASE):
+            return True
+    return False
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # DM에서 공지 명령어 처리
+    if isinstance(message.channel, discord.DMChannel):
+        if message.content.startswith("!공지"):
+            try:
+                parts = message.content.split(" ", 2)
+                if len(parts) < 3:
+                    await message.channel.send("사용법: !공지 {채널이름} {메세지}")
+                    return
+
+                channel_name = parts[1]
+                msg = parts[2]
+
+                guild = bot.get_guild(1330541603542269972)  # 서버 ID 입력
+                channel = discord.utils.get(guild.text_channels, name=channel_name)
+                
+                if channel is None:
+                    await message.channel.send(f"채널 '{channel_name}'을 찾을 수 없습니다.")
+                    return
+
+                await channel.send(msg)
+                await message.channel.send(f"'{channel_name}' 채널에 공지가 성공적으로 전송되었습니다.")
+            except Exception as e:
+                await message.channel.send(f"에러 발생: {str(e)}")
+        else:
+            await message.channel.send("이 채널에서는 명령어를 받을 수 없습니다. !공지 {채널이름} {메세지} 형식으로 보내주세요.")
+        return
+
+    # 🔹 경고 초기화 명령어 (!초기화 @사용자)
+    if message.content.startswith("!초기화"):
+        if message.mentions:
+            user = message.mentions[0]
+            user_id = str(user.id)
+
+            if user_id in warnings:
+                warnings[user_id] = 0
+                save_warnings(warnings)  # JSON 저장
+                await message.channel.send(f"✅ {user.mention}님의 경고 기록이 초기화되었습니다.")
+            else:
+                await message.channel.send(f"⚠️ {user.mention}님의 경고 기록이 없습니다.")
+        else:
+            await message.channel.send("사용법: `!초기화 @사용자`")
+        return
+
+    # 🔹 욕설 감지 및 경고 시스템
+    if any(word in message.content.lower() for word in BAD_WORDS):
+        user = message.author
+        user_id = str(user.id)
+
+        warnings[user_id] = warnings.get(user_id, 0) + 1  # 경고 증가
+        save_warnings(warnings)  # JSON 저장
+
+        # 🔹 관리자에게 DM으로 경고 신고 전송
+        report_message = (
+            f"🚨 **신고 접수됨** 🚨\n\n"
+            f"👤 **사용자**: {user} ({user.id})\n"
+            f"⚠️ **규칙 위반 내용**: {message.content}\n"
+            f"📊 **누적 위반 횟수**: {warnings[user_id]}회"
+        )
+
+        admin = await bot.fetch_user(admin_id)
+        if admin:
+            await admin.send(report_message)
+
+        # 🔹 경고 초과 시 1주일 타임아웃
+        if warnings[user_id] >= WARNING_LIMIT:
+            try:
+                timeout_until = discord.utils.utcnow() + timedelta(seconds=MUTE_DURATION)
+                await message.channel.send(
+                    f"⛔ {user.mention}, 경고 {WARNING_LIMIT}회 초과로 **1주일 타임아웃** 처리됩니다."
+                )
+                await user.timeout(timeout_until, reason="욕설 누적 경고 초과")
+                warnings[user_id] = 0  # 경고 초기화
+                save_warnings(warnings)  # JSON 저장
+            except Exception as e:
+                print(f"❌ 타임아웃 처리 중 오류 발생: {e}")
+        else:
+            await message.channel.send(
+                f"⚠️ {user.mention}, 욕설은 금지되어 있습니다. 한번 더 욕을 한다면 뮤트(1주일) 처리하겠습니다. 현재 경고 횟수: {warnings[user_id]} / {WARNING_LIMIT}."
+            )
+
+        # 🔹 메시지 삭제
+        try:
+            await message.delete()
+        except Exception as e:
+            print(f"❌ 메시지 삭제 중 오류 발생: {e}")
+
+    await bot.process_commands(message)
+
+    # FFmpeg 및 yt-dlp 옵션 설정
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+async def fetch_valorant_update():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(VALORANT_PATCH_URL) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, 'html.parser')
+            latest_patch = soup.find('a', class_='NewsCard__CardLink')
+            if latest_patch:
+                title = latest_patch.find('h3').text.strip()
+                link = 'https://playvalorant.com' + latest_patch['href']
+                return f'🔴 **Valorant 업데이트**: {title}\n🔗 {link}'
+            return None
+
+async def fetch_fisch_update():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(FISCH_GAME_URL) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, 'html.parser')
+            update_section = soup.find('div', class_='game-update-section')  # Replace with actual class
+            if update_section:
+                title = update_section.find('h3').text.strip()
+                return f'🔵 **Roblox - Fisch 업데이트**: {title}'
+            return None
+
+@tasks.loop(minutes=1)  # Check every 30 minutes
+async def check_updates():
+    channel = bot.get_channel(1330541603542269979)  # Replace with your channel ID
+    if channel:
+        valorant_update = await fetch_valorant_update()
+        fisch_update = await fetch_fisch_update()
+        
+        if valorant_update:
+            await channel.send(valorant_update)
+        if fisch_update:
+            await channel.send(fisch_update)
+
+# FFmpeg 실행 파일 경로
+FFMPEG_EXECUTABLE = "C:/ffmpeg/bin/ffmpeg.exe"
+
+
+YDL_OPTIONS = {'format': 'bestaudio', 'noplaylist': 'True'}
+DEFAULT_VOLUME = 0.5  # 기본 볼륨 설정 (50%)
+
+# 대기열 초기화
+song_queue = []
+
+# 인기 플레이리스트 샘플 목록
+popular_playlists = [
+    "https://www.youtube.com/watch?v=K4DyBUG242c&list=PLDcnymzs18LVXfO_x0Ei0R24qDbVtyy66",
+    "https://www.youtube.com/watch?v=ScMzIvxBSi4&list=PLFgquLnL59alGJcdc0BEZJb2p7Igk83fk",
+    "https://www.youtube.com/watch?v=JGwWNGJdvx8&list=PLMC9KNkIncKtPzgY-5rmhvj7fax8fdxoj"
+]
+
+# 수능금지곡 샘플 목록
+forbidden_songs = [
+    "https://www.youtube.com/watch?v=9bZkp7q19f0",  # 예: 강남스타일
+    "https://www.youtube.com/watch?v=60ItHLz5WEA",  # 예: Alone
+    "https://www.youtube.com/watch?v=3AtDnEC4zak"   # 예: Shape of You
+]
+
+# 메드무비 브금 샘플 목록
+bgm_songs = [
+    "https://www.youtube.com/watch?v=2Vv-BfVoq4g",  # Perfect
+    "https://www.youtube.com/watch?v=fJ9rUzIMcZQ",  # Bohemian Rhapsody
+    "https://www.youtube.com/watch?v=6Ejga4kJUts"   # Zombie
+]
+
+# 봇 준비 상태
+@bot.event
+async def on_ready():
+    print(f"봇이 준비되었습니다: {bot.user.name}")
+    logging.info(f"Logged in as {bot.user.name}")
+
+# 노래 재생 함수
+def play_next(vc):
+    if song_queue:
+        next_song = song_queue.pop(0)
+        vc.play(discord.PCMVolumeTransformer(next_song['audio_source'], volume=DEFAULT_VOLUME), after=lambda e: play_next(vc))
+
+class MusicControls(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+
+    @discord.ui.button(label="⏸️ 일시정지", style=discord.ButtonStyle.secondary)
+    async def pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ctx.voice_client and self.ctx.voice_client.is_playing():
+            self.ctx.voice_client.pause()
+            await interaction.response.send_message("⏸️ 음악이 일시정지되었습니다.", ephemeral=True)
+
+    @discord.ui.button(label="▶️ 재생", style=discord.ButtonStyle.secondary)
+    async def resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ctx.voice_client and self.ctx.voice_client.is_paused():
+            self.ctx.voice_client.resume()
+            await interaction.response.send_message("▶️ 음악이 재생되었습니다.", ephemeral=True)
+
+    @discord.ui.button(label="⏭️ 건너뛰기", style=discord.ButtonStyle.primary)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ctx.voice_client and self.ctx.voice_client.is_playing():
+            self.ctx.voice_client.stop()
+            await interaction.response.send_message("⏭️ 음악을 건너뛰었습니다.", ephemeral=True)
+
+    @discord.ui.button(label="🛑 정지", style=discord.ButtonStyle.danger)
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ctx.voice_client:
+            await self.ctx.voice_client.disconnect()
+            await interaction.response.send_message("🛑 음악을 정지하고 음성 채널에서 나왔습니다.", ephemeral=True)
+
+    @discord.ui.button(label="🎶 인기 플레이리스트", style=discord.ButtonStyle.success)
+    async def popular_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        playlist_url = random.choice(popular_playlists)
+        await self.play_from_url(interaction, playlist_url)
+
+    @discord.ui.button(label="🎵 수능금지곡", style=discord.ButtonStyle.success)
+    async def forbidden_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        song_url = random.choice(forbidden_songs)
+        await self.play_from_url(interaction, song_url)
+
+    @discord.ui.button(label="🎥 메드무비 브금", style=discord.ButtonStyle.success)
+    async def bgm_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        song_url = random.choice(bgm_songs)
+        await self.play_from_url(interaction, song_url)
+
+    @discord.ui.button(label="🔍 노래 검색", style=discord.ButtonStyle.primary)
+    async def search_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("검색할 노래 제목을 입력해주세요:", ephemeral=True)
+
+        def check(msg):
+            return msg.author == interaction.user and msg.channel == interaction.channel
+
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+            search = msg.content
+
+            with youtube_dl.YoutubeDL(YDL_OPTIONS) as ydl:
+                try:
+                    if "http" not in search:
+                        search = f"ytsearch:{search}"
+
+                    info = ydl.extract_info(search, download=False)
+                    if "entries" in info:
+                        info = info["entries"][0]
+
+                    url2 = info['url']
+                    title = info['title']
+
+                    audio_source = discord.FFmpegPCMAudio(executable=FFMPEG_EXECUTABLE, source=url2, **FFMPEG_OPTIONS)
+
+                    vc = self.ctx.voice_client
+                    if not vc:
+                        if self.ctx.author.voice:
+                            await self.ctx.author.voice.channel.connect()
+                            vc = self.ctx.voice_client
+                        else:
+                            await interaction.followup.send("먼저 음성 채널에 들어가야 합니다!", ephemeral=True)
+                            return
+
+                    if not vc.is_playing():
+                        vc.play(discord.PCMVolumeTransformer(audio_source, volume=DEFAULT_VOLUME), after=lambda e: play_next(vc))
+                        await interaction.followup.send(f"🎵 지금 재생 중: **{title}**")
+                    else:
+                        song_queue.append({'title': title, 'audio_source': audio_source})
+                        await interaction.followup.send(f"📋 대기열에 추가됨: **{title}**")
+                except Exception as e:
+                    await interaction.followup.send(f"⚠️ 노래를 재생할 수 없습니다: {e}")
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⏳ 시간 초과! 검색이 취소되었습니다.", ephemeral=True)
+
+    async def play_from_url(self, interaction, url):
+        ctx = self.ctx
+        vc = ctx.voice_client
+
+        if not vc:
+            if ctx.author.voice:
+                await ctx.author.voice.channel.connect()
+                vc = ctx.voice_client
+            else:
+                await interaction.response.send_message("먼저 음성 채널에 들어가야 합니다!", ephemeral=True)
+                return
+
+        with youtube_dl.YoutubeDL(YDL_OPTIONS) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False)
+                if "entries" in info:
+                    info = info["entries"][0]
+
+                url2 = info['url']
+                title = info['title']
+
+                audio_source = discord.FFmpegPCMAudio(executable=FFMPEG_EXECUTABLE, source=url2, **FFMPEG_OPTIONS)
+
+                if not vc.is_playing():
+                    vc.play(discord.PCMVolumeTransformer(audio_source, volume=DEFAULT_VOLUME), after=lambda e: play_next(vc))
+                    await interaction.response.send_message(f"🎵 지금 재생 중: **{title}**")
+                else:
+                    song_queue.append({'title': title, 'audio_source': audio_source})
+                    await interaction.response.send_message(f"📋 대기열에 추가됨: **{title}**")
+            except Exception as e:
+                await interaction.response.send_message(f"⚠️ 음악을 재생할 수 없습니다: {e}")
+
+                # !재생 명령어
+@bot.command(name="재생")
+async def play(ctx, *, search: str):
+    if not ctx.voice_client:
+        if ctx.author.voice:
+            await ctx.author.voice.channel.connect()
+        else:
+            await ctx.send("먼저 음성 채널에 들어가야 합니다!")
+            return
+
+    vc = ctx.voice_client
+
+    with youtube_dl.YoutubeDL(YDL_OPTIONS) as ydl:
+        try:
+            if "http" not in search:
+                search = f"ytsearch:{search}"
+
+            info = ydl.extract_info(search, download=False)
+            if "entries" in info:
+                info = info["entries"][0]
+
+            url2 = info['url']
+            title = info['title']
+
+            audio_source = discord.FFmpegPCMAudio(executable=FFMPEG_EXECUTABLE, source=url2, **FFMPEG_OPTIONS)
+
+            if not vc.is_playing():
+                vc.play(discord.PCMVolumeTransformer(audio_source, volume=DEFAULT_VOLUME), after=lambda e: play_next(vc))
+                await ctx.send(f"🎵 지금 재생 중: **{title}**", view=MusicControls(ctx))
+            else:
+                song_queue.append({'title': title, 'audio_source': audio_source})
+                await ctx.send(f"📋 대기열에 추가됨: **{title}**")
+        except Exception as e:
+            await ctx.send(f"⚠️ 음악을 재생할 수 없습니다: {e}")
+
+# !대기열 명령어
+@bot.command(name="대기열")
+async def queue(ctx):
+    if song_queue:
+        queue_list = '\n'.join([f"{idx + 1}. {song['title']}" for idx, song in enumerate(song_queue)])
+        await ctx.send(f"📋 대기열 목록:\n{queue_list}")
+    else:
+        await ctx.send("📋 대기열이 비어 있습니다.")
+
+# !볼륨 명령어
+@bot.command(name="볼륨")
+async def volume(ctx, volume: int):
+    if ctx.voice_client and ctx.voice_client.source:
+        if 0 <= volume <= 100:
+            ctx.voice_client.source.volume = volume / 100
+            await ctx.send(f"🔊 볼륨이 **{volume}%**로 설정되었습니다!")
+        else:
+            await ctx.send("⚠️ 볼륨은 0에서 100 사이로 설정해야 합니다.")
+    else:
+        await ctx.send("⚠️ 현재 재생 중인 음악이 없습니다.")
+
+# !중지 명령어
+@bot.command(name="중지")
+async def stop(ctx):
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        await ctx.send("🛑 음성 채널에서 나왔습니다!")
+    else:
+        await ctx.send("⚠️ 봇이 음성 채널에 있지 않습니다.")
+
+# 재연결 로직
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.id == bot.user.id:
+        if before.channel and not after.channel:
+            print("봇이 음성 채널에서 나갔습니다. 재연결 시도 중...")
+            await asyncio.sleep(1)
+            try:
+                if before.channel:
+                    await before.channel.connect()
+                    print("재연결 성공!")
+            except Exception as e:
+                print(f"재연결 실패: {e}")
+
+# 오류 핸들링
+@bot.event
+async def on_error(event, *args, **kwargs):
+    logging.error(f"오류 발생: {event}", exc_info=True)
+
+@bot.command()
+async def 팀랜덤(ctx, *users: str):
+    if len(users) < 2:
+        await ctx.send("두 명 이상의 유저를 지정해야 합니다.")
+        return
+
+    # 쉼표 제거 및 유저 멘션 처리
+    users = [user.strip("<@!>,") for user in users]  # 쉼표 및 불필요한 공백 제거
+    members = []
+    for user in users:
+        member = ctx.guild.get_member(int(user))
+        if member:
+            members.append(member)
+        else:
+            await ctx.send(f"유효하지 않은 유저 ID: {user}")
+            return
+
+    random.shuffle(members)
+    mid = len(members) // 2
+    team_a = members[:mid]
+    team_b = members[mid:]
+
+    team_a_mentions = [user.mention for user in team_a]
+    team_b_mentions = [user.mention for user in team_b]
+    await ctx.send(f"**A팀:** {', '.join(team_a_mentions)}\n**B팀:** {', '.join(team_b_mentions)}")
+
+# 로그 채널 정보를 저장하는 함수
+def save_log_channel(channel_id):
+    with open(LOG_FILE, "w") as f:
+        json.dump({"log_channel": channel_id}, f)
+
+# 로그 채널 정보를 불러오는 함수
+def load_log_channel():
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("log_channel")
+    return None
+
+# 📌 파일에서 로그 채널 불러오기
+def load_log_channels():
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+                if isinstance(data, list):  # 데이터가 리스트인지 확인
+                    return data
+                else:
+                    return []  # 만약 딕셔너리 형태라면 빈 리스트 반환
+            except json.JSONDecodeError:
+                return []  # 파일이 비어 있거나 잘못된 형식일 경우 빈 리스트 반환
+    return []  # 파일이 없을 경우 빈 리스트 반환
+
+# 📌 로그 채널을 파일에 저장
+def save_log_channels():
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(log_channels, f)
+
+log_channels = load_log_channels()  # 시작할 때 저장된 로그 채널 불러오기
+
+# 🔄 봇이 실행될 때 설정된 로그 채널 확인
+@bot.event
+async def on_ready():
+    print(f"✅ 봇이 실행되었습니다. (등록된 로그 채널 개수: {len(log_channels)})")
+
+# 📌 로그 채널 추가
+@bot.command()
+async def 로그설정(ctx, channel: discord.TextChannel):
+    if channel.id not in log_channels:
+        log_channels.append(channel.id)  # 로그 채널 추가
+        save_log_channels()  # 파일에 저장
+        await ctx.send(f"✅ 로그 채널 추가: {channel.mention}")
+    else:
+        await ctx.send("⚠️ 이 채널은 이미 로그 채널입니다.")
+
+# 📌 로그 채널 삭제
+@bot.command()
+async def 로그삭제(ctx, channel: discord.TextChannel):
+    if channel.id in log_channels:
+        log_channels.remove(channel.id)  # 로그 채널 제거
+        save_log_channels()  # 파일에 저장
+        await ctx.send(f"❌ 로그 채널 삭제: {channel.mention}")
+    else:
+        await ctx.send("⚠️ 이 채널은 로그 채널이 아닙니다.")
+
+# 📌 여러 채널에 로그 메시지 전송
+async def send_log(message):
+    for channel_id in log_channels:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            await channel.send(message)
+
+# 📌 메시지 삭제 로그
+@bot.event
+async def on_message_delete(message):
+    await send_log(f"🗑️ 메시지 삭제: {message.author} ({message.content})")
+
+# 📌 멤버 입장 로그
+@bot.event
+async def on_member_join(member):
+    await send_log(f"👋 {member}가 서버에 입장했습니다.")
+
+# 📌 멤버 퇴장 로그
+@bot.event
+async def on_member_remove(member):
+    await send_log(f"🚪 {member}가 서버를 떠났습니다.")
+
+# 📌 역할 변경 로그
+@bot.event
+async def on_member_update(before, after):
+    if before.roles != after.roles:
+        await send_log(f"🔄 {before}의 역할이 변경되었습니다: {before.roles} → {after.roles}")
+
+# 📌 최근 10개 로그 확인
+@bot.command()
+async def 로그보기(ctx):
+    if log_channels:
+        logs = []
+        for channel_id in log_channels:
+            channel = bot.get_channel(channel_id)
+            if channel:
+                async for msg in channel.history(limit=10):
+                    logs.append(f"[{channel.name}] {msg.content}")
+        if logs:
+            await ctx.send("\n".join(logs[-10:]))
+        else:
+            await ctx.send("📭 로그가 없습니다.")
+    else:
+        await ctx.send("⚠️ 로그 채널이 설정되지 않았습니다.")
+
+        # 서버 이름 변경 로그
+@bot.event
+async def on_guild_update(before, after):
+    if before.name != after.name:
+        await send_log(f"📝 서버 이름이 변경되었습니다: {before.name} → {after.name}")
+
+# 서버 아이콘 변경 로그
+@bot.event
+async def on_guild_update(before, after):
+    if before.icon != after.icon:
+        await send_log(f"🖼️ 서버 아이콘이 변경되었습니다.")
+
+# 차단 로그
+@bot.command()
+async def 차단(ctx, member: discord.Member, reason: str):
+    # 차단 로직
+    await send_log(f"⛔ {member}가 차단되었습니다. 사유: {reason}")
+    await ctx.send(f"{member}가 차단되었습니다.")
+
+@bot.command()
+async def 투표(ctx, question: str, *choices: str):
+    # 선택지가 2개 이상이어야 한다는 조건 추가
+    if len(choices) < 2:
+        await ctx.send("최소 2개의 선택지가 필요합니다.")
+        return
+
+    # 질문과 선택지 텍스트 생성
+    embed = discord.Embed(title=question, description="다음 중 하나를 선택하세요.", color=discord.Color.blue())
+
+    # 각 선택지에 대해 번호 지정
+    for i, choice in enumerate(choices):
+        embed.add_field(name=f"선택지 {i+1}: {choice}", value=f"🤔 {choice}", inline=False)
+
+    # 메시지를 보냄
+    message = await ctx.send(embed=embed)
+
+    # 각 선택지에 대해 반응(이모지) 추가
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]  # 최대 6개의 선택지
+    for i in range(len(choices)):
+        await message.add_reaction(emojis[i])
+
+    # 반응을 누른 사용자들을 기록하는 방법을 추가하려면, 추가적인 로직 필요
+
+# 환경변수에서 토큰 가져오기
+TOKEN = os.getenv("TOKEN")  # 환경변수 이름 확인!
+
+if TOKEN is None:
+    raise ValueError("🚨 환경변수 TOKEN이 설정되지 않았습니다!")
+
+# ❌ 잘못된 코드: bot.run("TOKEN")  (문자열 "TOKEN"을 입력하고 있음)
+# ✅ 올바른 코드:
+bot.run(TOKEN)
